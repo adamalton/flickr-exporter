@@ -3,7 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
-from time import sleep
+from time import monotonic, sleep
 from typing import Callable, Protocol
 
 import requests
@@ -12,11 +12,11 @@ from flickr_exporter.flickr_api import FlickrClient
 from flickr_exporter.models import Album, Photo
 
 DEFAULT_WORKERS = 4
+MIN_HARD_DOWNLOAD_TIMEOUT_PER_PHOTO_SECONDS = 10.0
 
 
 class MetadataWriterProtocol(Protocol):
-    def write_metadata(self, photo_path: str | Path, photo: Photo) -> None:
-        ...
+    def write_metadata(self, photo_path: str | Path, photo: Photo) -> None: ...
 
 
 class FlickrExporter:
@@ -78,7 +78,9 @@ class FlickrExporter:
 
         with ThreadPoolExecutor(max_workers=DEFAULT_WORKERS) as executor:
             futures = [
-                executor.submit(self._process_album_with_tracking, worker_id, album, downloaded_files, downloaded_files_lock)
+                executor.submit(
+                    self._process_album_with_tracking, worker_id, album, downloaded_files, downloaded_files_lock
+                )
                 for worker_id, album in enumerate(albums, start=1)
             ]
             for future in as_completed(futures):
@@ -170,35 +172,39 @@ class FlickrExporter:
             if self.verbose:
                 print(f"Downloading photo {index + 1}/{len(album.photos)}: {photo.title}")
 
-            photo_path = album_path / photo.filename
+            resolved_filename = photo_output_filename(photo)
+            if not photo.filename.strip():
+                print(f"  Warning: Photo {photo.id} has no filename from Flickr; using '{resolved_filename}'")
+
+            photo_path = album_path / resolved_filename
             if photo_path.exists():
                 if self.verbose:
-                    print(f"  Skipping (already exists): {photo.filename}")
+                    print(f"  Skipping (already exists): {photo_path.name}")
                 continue
 
             try:
                 self.fetch_photo_metadata(photo)
             except Exception as error:
-                print(f"  Warning: Failed to get metadata for {photo.filename}: {error}")
-                failed_downloads.append(photo.filename)
+                print(f"  Warning: Failed to get metadata for {resolved_filename}: {error}")
+                failed_downloads.append(resolved_filename)
                 continue
 
             try:
                 self.download_photo(photo, photo_path)
             except Exception as error:
-                print(f"  Warning: Failed to download {photo.filename}: {error}")
-                failed_downloads.append(photo.filename)
+                print(f"  Warning: Failed to download {resolved_filename}: {error}")
+                failed_downloads.append(resolved_filename)
                 continue
 
             try:
                 self.metadata_writer.write_metadata(photo_path, photo)
             except Exception as error:
-                print(f"  Error: Failed to write metadata for {photo.filename}: {error}")
+                print(f"  Error: Failed to write metadata for {resolved_filename}: {error}")
                 try:
                     photo_path.unlink()
                 except OSError as remove_error:
-                    print(f"  Error: Also failed to remove incomplete photo {photo.filename}: {remove_error}")
-                failed_downloads.append(photo.filename)
+                    print(f"  Error: Also failed to remove incomplete photo {resolved_filename}: {remove_error}")
+                failed_downloads.append(resolved_filename)
                 continue
 
             if index < len(album.photos) - 1:
@@ -230,13 +236,32 @@ class FlickrExporter:
         self._download_photo_attempt(photo.original_url, output)
 
     def _download_photo_attempt(self, url: str, output_path: Path) -> None:
-        with requests.get(url, stream=True, timeout=self.client.request_timeout) as response:
-            if response.status_code != 200:
-                raise RuntimeError(f"HTTP {response.status_code}: {response.reason}")
-            with output_path.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 64):
-                    if chunk:
-                        handle.write(chunk)
+        # This is a per-photo ceiling for a single download attempt, not a limit on the overall export run.
+        hard_timeout = max(self.client.request_timeout * 5, MIN_HARD_DOWNLOAD_TIMEOUT_PER_PHOTO_SECONDS)
+        started_at = monotonic()
+
+        try:
+            with requests.get(
+                url,
+                stream=True,
+                timeout=(self.client.request_timeout, self.client.request_timeout),
+            ) as response:
+                if response.status_code != 200:
+                    raise RuntimeError(f"HTTP {response.status_code}: {response.reason}")
+                with output_path.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 64):
+                        if monotonic() - started_at > hard_timeout:
+                            raise RuntimeError(
+                                f"download exceeded hard timeout of {hard_timeout:.0f}s for {output_path.name}"
+                            )
+                        if chunk:
+                            handle.write(chunk)
+        except requests.Timeout as error:
+            raise RuntimeError(
+                f"download timed out after {self.client.request_timeout:.0f}s waiting for {output_path.name}"
+            ) from error
+        except requests.RequestException as error:
+            raise RuntimeError(f"download request failed for {output_path.name}: {error}") from error
 
     def download_unorganized_photos(self, downloaded_files: set[str]) -> None:
         print("Getting all photos from your Flickr account...")
@@ -280,48 +305,73 @@ class FlickrExporter:
 
     def _download_unorganized_photo(self, worker_id: int, photo: Photo, unorganized_dir: Path) -> str | None:
         worker_exporter = self.clone()
+        resolved_filename = photo_output_filename(photo)
         if worker_exporter.verbose:
-            print(f"[Worker {worker_id}] Downloading unorganized photo: {photo.title}")
+            print(f"[Worker {worker_id}] Downloading unorganized photo: {photo.title or resolved_filename}")
 
         try:
             worker_exporter.fetch_photo_metadata(photo)
         except Exception as error:
-            return f"worker {worker_id}: failed to process {photo.filename}: {error}"
+            return f"worker {worker_id}: failed to process {resolved_filename}: {error}"
 
         return worker_exporter._download_photo_to_directory(worker_id, photo, unorganized_dir)
 
     def _download_dated_photo(self, worker_id: int, photo: Photo) -> str | None:
         worker_exporter = self.clone()
+        resolved_filename = photo_output_filename(photo)
         if worker_exporter.verbose:
-            print(f"[Worker {worker_id}] Downloading dated photo: {photo.title}")
+            print(f"[Worker {worker_id}] Downloading dated photo: {photo.title or resolved_filename}")
+            print(f"[Worker {worker_id}] Fetching metadata for photo {photo.id}")
 
         try:
             worker_exporter.fetch_photo_metadata(photo)
         except Exception as error:
-            return f"worker {worker_id}: failed to process {photo.filename}: {error}"
+            return f"worker {worker_id}: failed to process {resolved_filename}: {error}"
 
         target_dir = worker_exporter.output_dir / photo_date_directory_name(photo)
-        target_dir.mkdir(parents=True, exist_ok=True)
         return worker_exporter._download_photo_to_directory(worker_id, photo, target_dir)
 
     def _download_photo_to_directory(self, worker_id: int, photo: Photo, target_dir: Path) -> str | None:
-        photo_path = target_dir / photo.filename
+        resolved_filename = photo_output_filename(photo)
+        if not photo.filename.strip():
+            print(
+                f"[Worker {worker_id}] Warning: Photo {photo.id} has no filename from Flickr; using '{resolved_filename}'"
+            )
+
+        photo_path = target_dir / resolved_filename
         if photo_path.exists():
             if self.verbose:
-                print(f"[Worker {worker_id}] Skipping (already exists): {photo.filename}")
+                print(f"[Worker {worker_id}] Skipping (already exists): {photo_path}")
             return None
 
+        if self.verbose:
+            print(f"[Worker {worker_id}] Saving photo {photo.id} to {photo_path}")
+
+        target_dir.mkdir(parents=True, exist_ok=True)
         try:
+            if self.verbose:
+                print(f"[Worker {worker_id}] Downloading file for {photo.id}")
             self.download_photo(photo, photo_path)
+            if self.verbose:
+                print(f"[Worker {worker_id}] Writing metadata for {photo_path.name}")
             self.metadata_writer.write_metadata(photo_path, photo)
         except Exception as error:
             if photo_path.exists():
                 try:
                     photo_path.unlink()
                 except OSError as remove_error:
-                    print(f"[Worker {worker_id}] Error: Also failed to remove incomplete photo {photo.filename}: {remove_error}")
-            return f"worker {worker_id}: failed to process {photo.filename}: {error}"
+                    print(
+                        f"[Worker {worker_id}] Error: Also failed to remove incomplete photo "
+                        f"{resolved_filename}: {remove_error}"
+                    )
+            try:
+                target_dir.rmdir()
+            except OSError:
+                pass
+            return f"worker {worker_id}: failed to process {resolved_filename}: {error}"
 
+        if self.verbose:
+            print(f"[Worker {worker_id}] Completed {photo_path}")
         self._sleep(0.1)
         return None
 
@@ -335,6 +385,14 @@ def photo_date_directory_name(photo: Photo) -> str:
     if photo.date_taken is None:
         return "Unknown Date"
     return photo.date_taken.strftime("%Y-%m")
+
+
+def photo_output_filename(photo: Photo) -> str:
+    if photo.filename.strip():
+        return sanitize_filename(photo.filename.strip())
+    if photo.id.strip():
+        return sanitize_filename(photo.id.strip())
+    return "unknown-photo"
 
 
 def sanitize_filename(filename: str) -> str:

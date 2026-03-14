@@ -10,6 +10,7 @@ from flickr_exporter.exporter import (
     album_directory_name,
     filter_unorganized_photos,
     photo_date_directory_name,
+    photo_output_filename,
     sanitize_filename,
 )
 from flickr_exporter.models import Album, Credentials, Photo
@@ -102,6 +103,10 @@ def test_photo_date_directory_name_handles_missing_date():
     assert photo_date_directory_name(Photo(id="1")) == "Unknown Date"
 
 
+def test_photo_output_filename_falls_back_to_photo_id():
+    assert photo_output_filename(Photo(id="photo-1", filename="")) == "photo-1"
+
+
 def test_download_album_skips_existing_files_without_fetching_metadata(tmp_path, monkeypatch):
     exporter = make_exporter(tmp_path)
     album = Album(
@@ -120,6 +125,20 @@ def test_download_album_skips_existing_files_without_fetching_metadata(tmp_path,
 
     exporter.download_album(album)
 
+    assert existing.read_bytes() == b"already here"
+
+
+def test_download_photo_to_directory_skips_existing_photo_using_fallback_filename(tmp_path, monkeypatch):
+    exporter = make_exporter(tmp_path)
+    target_dir = tmp_path / "2026-02"
+    target_dir.mkdir(parents=True)
+    existing = target_dir / "photo-1"
+    existing.write_bytes(b"already here")
+    photo = Photo(id="photo-1", filename="", original_url="https://example.com/photo")
+
+    monkeypatch.setattr(exporter, "download_photo", lambda photo, output_path: pytest.fail("photo should not be downloaded"))
+
+    assert exporter._download_photo_to_directory(1, photo, target_dir) is None
     assert existing.read_bytes() == b"already here"
 
 
@@ -209,3 +228,56 @@ def test_export_all_photos_by_date_uses_year_month_directories(tmp_path, monkeyp
     expected_path = tmp_path / "2026-02" / "photo.jpg"
     assert expected_path.exists()
     assert writer.calls[0][0] == expected_path
+
+
+def test_export_all_photos_by_date_uses_photo_id_when_filename_missing(tmp_path, monkeypatch):
+    writer = DummyMetadataWriter()
+    client = FakeFlickrClient()
+    client.all_photos = [Photo(id="photo-1", filename="", original_url="https://example.com/photo")]
+    exporter = FlickrExporter(
+        client=client,
+        output_dir=str(tmp_path),
+        metadata_writer=writer,
+        verbose=False,
+        sleeper=lambda _: None,
+    )
+
+    def fake_fetch(photo: Photo) -> None:
+        photo.date_taken = datetime(2026, 2, 10, 12, 0, 0)
+
+    def fake_download(photo: Photo, output_path: str | Path) -> None:
+        Path(output_path).write_bytes(b"downloaded")
+
+    monkeypatch.setattr(FlickrExporter, "fetch_photo_metadata", lambda self, photo: fake_fetch(photo))
+    monkeypatch.setattr(FlickrExporter, "download_photo", lambda self, photo, output_path: fake_download(photo, output_path))
+
+    exporter.export_all_photos_by_date()
+
+    expected_path = tmp_path / "2026-02" / "photo-1"
+    assert expected_path.exists()
+    assert writer.calls[0][0] == expected_path
+
+
+def test_download_photo_attempt_aborts_after_hard_timeout(tmp_path, monkeypatch):
+    exporter = make_exporter(tmp_path)
+    output_path = tmp_path / "photo.jpg"
+    monotonic_values = iter([0.0, 301.0])
+
+    class FakeResponse:
+        status_code = 200
+        reason = "OK"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def iter_content(self, chunk_size: int):
+            yield b"partial-data"
+
+    monkeypatch.setattr("flickr_exporter.exporter.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("flickr_exporter.exporter.requests.get", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(RuntimeError, match="hard timeout"):
+        exporter._download_photo_attempt("https://example.com/photo.jpg", output_path)
