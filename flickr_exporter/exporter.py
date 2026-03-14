@@ -12,10 +12,10 @@ import requests
 from flickr_exporter.flickr_api import FlickrClient
 from flickr_exporter.models import Album, Photo
 
-DEFAULT_WORKERS = 4
+DEFAULT_WORKERS = 2
 MIN_HARD_DOWNLOAD_TIMEOUT_PER_PHOTO_SECONDS = 10.0
-MAX_DOWNLOAD_ATTEMPTS = 4
-DOWNLOAD_RETRY_BASE_DELAY_SECONDS = 5.0
+MAX_DOWNLOAD_ATTEMPTS = 8
+DOWNLOAD_RETRY_BASE_DELAY_SECONDS = 7.0
 
 
 class MetadataWriterProtocol(Protocol):

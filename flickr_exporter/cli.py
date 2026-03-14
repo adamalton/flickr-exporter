@@ -93,7 +93,7 @@ def root(
     output: Annotated[
         str, typer.Option("--output", "-o", help="Output directory for exported photos")
     ] = "./flickr-export",
-    workers: Annotated[int, typer.Option("--workers", "-w", min=1, help="Concurrent download workers")] = 4,
+    workers: Annotated[int, typer.Option("--workers", "-w", min=1, help="Concurrent download workers")] = 2,
     oauth_token: Annotated[str, typer.Option("--oauth-token", help="OAuth token")] = "",
     oauth_token_secret: Annotated[str, typer.Option("--oauth-token-secret", help="OAuth token secret")] = "",
     creds_file: Annotated[
