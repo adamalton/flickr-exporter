@@ -1,3 +1,8 @@
 creds.yml
-flickr-exporter
 flickr-export
+.venv
+__pycache__/
+.pytest_cache/
+*.egg-info/
+build/
+dist/

@@ -1,22 +1,21 @@
-# Makefile for flickr-exporter
+PYTHON ?= python3
+PIP = $(PYTHON) -m pip
 
-# Binary name
-BINARY = flickr-exporter
+all: test
 
-# Go parameters
-GOCMD = go
-GOBUILD = $(GOCMD) build
-GOCLEAN = $(GOCMD) clean
+install:
+	$(PIP) install -e .
 
-# Build target
-all: build
+dev-install:
+	$(PIP) install -e ".[dev]"
+
+test:
+	$(PYTHON) -m pytest
 
 build:
-	$(GOBUILD) -o $(BINARY) -v
+	$(PYTHON) -m build
 
-# Clean target - removes only the binary, not downloaded photos
 clean:
-	$(GOCLEAN)
-	rm -f $(BINARY)
+	rm -rf build dist .pytest_cache *.egg-info
 
-.PHONY: all build clean
+.PHONY: all install dev-install test build clean

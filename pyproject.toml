@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flickr-exporter"
+version = "0.1.0"
+description = "Export original-resolution photos from Flickr"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+dependencies = [
+  "PyYAML>=6.0",
+  "requests>=2.32.0",
+  "requests-oauthlib>=2.0.0",
+  "typer>=0.16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.2",
+  "pytest>=8.3.0",
+]
+
+[project.scripts]
+flickr-exporter = "flickr_exporter.cli:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["flickr_exporter*"]
