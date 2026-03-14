@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 from threading import Lock
 from time import monotonic, sleep
@@ -127,29 +127,48 @@ class FlickrExporter:
         total_photos = len(all_photos)
 
         with ThreadPoolExecutor(max_workers=DEFAULT_WORKERS) as executor:
-            futures = [
-                executor.submit(self._download_dated_photo, worker_id, photo)
-                for worker_id, photo in enumerate(all_photos, start=1)
-            ]
-            for future in as_completed(futures):
-                error = future.result()
-                processed_count += 1
-                if error is None:
-                    success_count += 1
-                else:
-                    errors.append(error)
-                    print(f"  Error: {error}")
+            photo_iterator = iter(enumerate(all_photos, start=1))
+            pending = self._submit_dated_photo_futures(executor, photo_iterator)
 
-                print(
-                    f"Progress: {processed_count}/{total_photos} photos processed "
-                    f"({success_count} succeeded, {len(errors)} errors)"
-                )
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                pending = set(pending)
+
+                for future in done:
+                    error = future.result()
+                    processed_count += 1
+                    if error is None:
+                        success_count += 1
+                    else:
+                        errors.append(error)
+                        print(f"  Error: {error}")
+
+                    print(
+                        f"Progress: {processed_count}/{total_photos} photos processed "
+                        f"({success_count} succeeded, {len(errors)} errors)"
+                    )
+                    pending = self._submit_dated_photo_futures(executor, photo_iterator, pending)
 
         if errors:
             print(f"Downloaded {success_count} photos with {len(errors)} errors")
             raise RuntimeError(f"failed to download {len(errors)} photos by date")
 
         print(f"Successfully downloaded {success_count} photos by date")
+
+    def _submit_dated_photo_futures(
+        self,
+        executor: ThreadPoolExecutor,
+        photo_iterator: object,
+        pending: set | None = None,
+    ) -> set:
+        pending_futures = set() if pending is None else pending
+        while len(pending_futures) < DEFAULT_WORKERS:
+            try:
+                task_id, photo = next(photo_iterator)
+            except StopIteration:
+                break
+            pending_futures.add(executor.submit(self._download_dated_photo, task_id, photo))
+        return pending_futures
 
     def _process_album_with_tracking(
         self,
@@ -311,23 +330,27 @@ class FlickrExporter:
         total_photos = len(unorganized_photos)
 
         with ThreadPoolExecutor(max_workers=DEFAULT_WORKERS) as executor:
-            futures = [
-                executor.submit(self._download_unorganized_photo, worker_id, photo, unorganized_dir)
-                for worker_id, photo in enumerate(unorganized_photos, start=1)
-            ]
-            for future in as_completed(futures):
-                error = future.result()
-                processed_count += 1
-                if error is None:
-                    success_count += 1
-                else:
-                    errors.append(error)
-                    print(f"  Error: {error}")
+            photo_iterator = iter(enumerate(unorganized_photos, start=1))
+            pending = self._submit_unorganized_photo_futures(executor, photo_iterator, unorganized_dir)
 
-                print(
-                    f"Unorganized progress: {processed_count}/{total_photos} photos processed "
-                    f"({success_count} succeeded, {len(errors)} errors)"
-                )
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                pending = set(pending)
+
+                for future in done:
+                    error = future.result()
+                    processed_count += 1
+                    if error is None:
+                        success_count += 1
+                    else:
+                        errors.append(error)
+                        print(f"  Error: {error}")
+
+                    print(
+                        f"Unorganized progress: {processed_count}/{total_photos} photos processed "
+                        f"({success_count} succeeded, {len(errors)} errors)"
+                    )
+                    pending = self._submit_unorganized_photo_futures(executor, photo_iterator, unorganized_dir, pending)
 
         if errors:
             print(f"Downloaded {success_count} unorganized photos with {len(errors)} errors")
@@ -335,58 +358,74 @@ class FlickrExporter:
 
         print(f"Successfully downloaded {success_count} unorganized photos")
 
-    def _download_unorganized_photo(self, worker_id: int, photo: Photo, unorganized_dir: Path) -> str | None:
+    def _submit_unorganized_photo_futures(
+        self,
+        executor: ThreadPoolExecutor,
+        photo_iterator: object,
+        unorganized_dir: Path,
+        pending: set | None = None,
+    ) -> set:
+        pending_futures = set() if pending is None else pending
+        while len(pending_futures) < DEFAULT_WORKERS:
+            try:
+                task_id, photo = next(photo_iterator)
+            except StopIteration:
+                break
+            pending_futures.add(executor.submit(self._download_unorganized_photo, task_id, photo, unorganized_dir))
+        return pending_futures
+
+    def _download_unorganized_photo(self, task_id: int, photo: Photo, unorganized_dir: Path) -> str | None:
         worker_exporter = self.clone()
         resolved_filename = photo_output_filename(photo)
         if worker_exporter.verbose:
-            print(f"[Worker {worker_id}] Downloading unorganized photo: {photo.title or resolved_filename}")
+            print(f"[Task {task_id}] Downloading unorganized photo: {photo.title or resolved_filename}")
 
         try:
             worker_exporter.fetch_photo_metadata(photo)
         except Exception as error:
-            return f"worker {worker_id}: failed to process {resolved_filename}: {error}"
+            return f"task {task_id}: failed to process {resolved_filename}: {error}"
 
-        return worker_exporter._download_photo_to_directory(worker_id, photo, unorganized_dir)
+        return worker_exporter._download_photo_to_directory(task_id, photo, unorganized_dir)
 
-    def _download_dated_photo(self, worker_id: int, photo: Photo) -> str | None:
+    def _download_dated_photo(self, task_id: int, photo: Photo) -> str | None:
         worker_exporter = self.clone()
         resolved_filename = photo_output_filename(photo)
-        print(f"[Worker {worker_id}] Starting photo {photo.id} ({photo.title or resolved_filename})")
+        print(f"[Task {task_id}] Starting photo {photo.id} ({photo.title or resolved_filename})")
         if worker_exporter.verbose:
-            print(f"[Worker {worker_id}] Fetching metadata for photo {photo.id}")
+            print(f"[Task {task_id}] Fetching metadata for photo {photo.id}")
 
         try:
             worker_exporter.fetch_photo_metadata(photo)
         except Exception as error:
-            return f"worker {worker_id}: failed to process {resolved_filename}: {error}"
+            return f"task {task_id}: failed to process {resolved_filename}: {error}"
 
         target_dir = worker_exporter.output_dir / photo_date_directory_name(photo)
-        print(f"[Worker {worker_id}] Target path: {target_dir.name}/{resolved_filename}")
-        return worker_exporter._download_photo_to_directory(worker_id, photo, target_dir)
+        print(f"[Task {task_id}] Target path: {target_dir.name}/{resolved_filename}")
+        return worker_exporter._download_photo_to_directory(task_id, photo, target_dir)
 
-    def _download_photo_to_directory(self, worker_id: int, photo: Photo, target_dir: Path) -> str | None:
+    def _download_photo_to_directory(self, task_id: int, photo: Photo, target_dir: Path) -> str | None:
         resolved_filename = photo_output_filename(photo)
         if not photo.filename.strip():
             print(
-                f"[Worker {worker_id}] Warning: Photo {photo.id} has no filename from Flickr; using '{resolved_filename}'"
+                f"[Task {task_id}] Warning: Photo {photo.id} has no filename from Flickr; using '{resolved_filename}'"
             )
 
         photo_path = target_dir / resolved_filename
         if photo_path.exists():
             if self.verbose:
-                print(f"[Worker {worker_id}] Skipping (already exists): {photo_path}")
+                print(f"[Task {task_id}] Skipping (already exists): {photo_path}")
             return None
 
         if self.verbose:
-            print(f"[Worker {worker_id}] Saving photo {photo.id} to {photo_path}")
+            print(f"[Task {task_id}] Saving photo {photo.id} to {photo_path}")
 
         target_dir.mkdir(parents=True, exist_ok=True)
         try:
             if self.verbose:
-                print(f"[Worker {worker_id}] Downloading file for {photo.id}")
+                print(f"[Task {task_id}] Downloading file for {photo.id}")
             self.download_photo(photo, photo_path)
             if self.verbose:
-                print(f"[Worker {worker_id}] Writing metadata for {photo_path.name}")
+                print(f"[Task {task_id}] Writing metadata for {photo_path.name}")
             self.metadata_writer.write_metadata(photo_path, photo)
         except Exception as error:
             if photo_path.exists():
@@ -394,17 +433,17 @@ class FlickrExporter:
                     photo_path.unlink()
                 except OSError as remove_error:
                     print(
-                        f"[Worker {worker_id}] Error: Also failed to remove incomplete photo "
+                        f"[Task {task_id}] Error: Also failed to remove incomplete photo "
                         f"{resolved_filename}: {remove_error}"
                     )
             try:
                 target_dir.rmdir()
             except OSError:
                 pass
-            return f"worker {worker_id}: failed to process {resolved_filename}: {error}"
+            return f"task {task_id}: failed to process {resolved_filename}: {error}"
 
         if self.verbose:
-            print(f"[Worker {worker_id}] Completed {photo_path}")
+            print(f"[Task {task_id}] Completed {photo_path}")
         self._sleep(0.1)
         return None
 
