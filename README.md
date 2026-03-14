@@ -58,30 +58,32 @@ This prints an authorization URL, prompts for the verification code, and writes 
 Download all photos, organized by album:
 
 ```bash
-flickr-exporter all -o /path/to/output/directory
+flickr-exporter -o /path/to/output/directory all
 ```
 
 Download all photos, organized by month taken:
 
 ```bash
-flickr-exporter date -o /path/to/output/directory
+flickr-exporter -o /path/to/output/directory date
 ```
 
 Download one or more albums:
 
 ```bash
-flickr-exporter album ALBUM_ID ALBUM_ID_2 -o /path/to/output/directory
+flickr-exporter -o /path/to/output/directory album ALBUM_ID ALBUM_ID_2
 ```
 
 Download one or more collections:
 
 ```bash
-flickr-exporter collection COLLECTION_ID COLLECTION_ID_2 -o /path/to/output/directory
+flickr-exporter -o /path/to/output/directory collection COLLECTION_ID COLLECTION_ID_2
 ```
 
 Photos not in any album are written to `Unorganized Photos/`.
 
 ### Common Options
+
+These options are defined on the top-level command, so place them before the subcommand, for example `flickr-exporter -o ~/Pictures all`.
 
 - `-c, --creds, --creds-file`: Path to credentials file, default `creds.yml`
 - `-k, --api-key`: Flickr API key
@@ -127,16 +129,16 @@ If metadata writing fails, the downloaded file is removed so reruns can cleanly 
 flickr-exporter auth -k abc123 -s xyz789 --save-creds creds.yml
 
 # Download all photos
-flickr-exporter all -o ~/Pictures/Flickr-Backup
+flickr-exporter -o ~/Pictures/Flickr-Backup all
 
 # Download all photos into year-month folders
-flickr-exporter date -o ~/Pictures/Flickr-By-Date
+flickr-exporter -o ~/Pictures/Flickr-By-Date date
 
 # Download a specific album with verbose output
-flickr-exporter album 72157694563874100 -o ~/Pictures -v
+flickr-exporter -o ~/Pictures -v album 72157694563874100
 
 # Download photos from a collection
-flickr-exporter collection 12345-67890 -o ~/Pictures/Collections
+flickr-exporter -o ~/Pictures/Collections collection 12345-67890
 ```
 
 ## Development
