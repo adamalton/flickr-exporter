@@ -57,26 +57,26 @@ This prints an authorization URL, prompts for the verification code, and writes 
 Download all photos, organized by album:
 
 ```bash
-flickr-exporter -c creds.yml all -o /path/to/output/directory
+flickr-exporter all -o /path/to/output/directory
 ```
 
 Download one or more albums:
 
 ```bash
-flickr-exporter -c creds.yml album ALBUM_ID ALBUM_ID_2 -o /path/to/output/directory
+flickr-exporter album ALBUM_ID ALBUM_ID_2 -o /path/to/output/directory
 ```
 
 Download one or more collections:
 
 ```bash
-flickr-exporter -c creds.yml collection COLLECTION_ID COLLECTION_ID_2 -o /path/to/output/directory
+flickr-exporter collection COLLECTION_ID COLLECTION_ID_2 -o /path/to/output/directory
 ```
 
 Photos not in any album are written to `Unorganized Photos/`.
 
 ### Common Options
 
-- `-c, --creds, --creds-file`: Path to credentials file
+- `-c, --creds, --creds-file`: Path to credentials file, default `creds.yml`
 - `-k, --api-key`: Flickr API key
 - `-s, --api-secret`: Flickr API secret
 - `--oauth-token`: OAuth token override
@@ -118,13 +118,13 @@ If metadata writing fails, the downloaded file is removed so reruns can cleanly 
 flickr-exporter auth -k abc123 -s xyz789 --save-creds creds.yml
 
 # Download all photos
-flickr-exporter -c creds.yml all -o ~/Pictures/Flickr-Backup
+flickr-exporter all -o ~/Pictures/Flickr-Backup
 
 # Download a specific album with verbose output
-flickr-exporter -c creds.yml album 72157694563874100 -o ~/Pictures -v
+flickr-exporter album 72157694563874100 -o ~/Pictures -v
 
 # Download photos from a collection
-flickr-exporter -c creds.yml collection 12345-67890 -o ~/Pictures/Collections
+flickr-exporter collection 12345-67890 -o ~/Pictures/Collections
 ```
 
 ## Development

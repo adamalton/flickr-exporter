@@ -13,6 +13,7 @@ from flickr_exporter.metadata import MetadataWriter
 from flickr_exporter.models import Credentials
 
 app = typer.Typer(add_completion=False, help="Export original-resolution photos from Flickr")
+DEFAULT_CREDS_FILE = Path("creds.yml")
 
 
 @dataclass(slots=True)
@@ -37,9 +38,23 @@ def _load_config(
         oauth_token=oauth_token,
         oauth_token_secret=oauth_token_secret,
     )
-    if creds_file is not None:
+    if creds_file is not None and creds_file.exists():
         credentials = merge_credentials(credentials, load_credentials(creds_file))
     return AppConfig(credentials=credentials, output_dir=output_dir, verbose=verbose)
+
+
+def _merge_command_credentials(base: Credentials, overrides: Credentials) -> Credentials:
+    return merge_credentials(overrides, base)
+
+
+def _load_optional_credentials(credentials: Credentials, creds_file: Path | None) -> Credentials:
+    if creds_file is None:
+        return credentials
+    if not creds_file.exists():
+        if creds_file == DEFAULT_CREDS_FILE:
+            return credentials
+        raise typer.BadParameter(f"Credentials file not found: {creds_file}")
+    return merge_credentials(credentials, load_credentials(creds_file))
 
 
 def _require_api_credentials(credentials: Credentials, *, auth_only: bool = False) -> None:
@@ -72,13 +87,15 @@ def root(
     ctx: typer.Context,
     api_key: Annotated[str, typer.Option("--api-key", "-k", help="Flickr API Key")] = "",
     api_secret: Annotated[str, typer.Option("--api-secret", "-s", help="Flickr API Secret")] = "",
-    output: Annotated[str, typer.Option("--output", "-o", help="Output directory for exported photos")] = "./flickr-export",
+    output: Annotated[
+        str, typer.Option("--output", "-o", help="Output directory for exported photos")
+    ] = "./flickr-export",
     oauth_token: Annotated[str, typer.Option("--oauth-token", help="OAuth token")] = "",
     oauth_token_secret: Annotated[str, typer.Option("--oauth-token-secret", help="OAuth token secret")] = "",
     creds_file: Annotated[
-        Path | None,
+        Path,
         typer.Option("--creds-file", "--creds", "-c", help="Credentials file (YAML)"),
-    ] = None,
+    ] = DEFAULT_CREDS_FILE,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose logging")] = False,
 ) -> None:
     ctx.obj = _load_config(
@@ -95,15 +112,30 @@ def root(
 @app.command()
 def auth(
     ctx: typer.Context,
+    api_key: Annotated[str, typer.Option("--api-key", "-k", help="Flickr API Key")] = "",
+    api_secret: Annotated[str, typer.Option("--api-secret", "-s", help="Flickr API Secret")] = "",
+    creds_file: Annotated[
+        Path,
+        typer.Option("--creds-file", "--creds", "-c", help="Credentials file (YAML)"),
+    ] = DEFAULT_CREDS_FILE,
     save_creds: Annotated[Path | None, typer.Option("--save-creds", help="Save credentials to this YAML file")] = None,
 ) -> None:
     config: AppConfig = ctx.obj
-    _require_api_credentials(config.credentials, auth_only=True)
+    credentials = _merge_command_credentials(
+        config.credentials,
+        Credentials(
+            api_key=api_key,
+            api_secret=api_secret,
+        ),
+    )
+    credentials = _load_optional_credentials(credentials, creds_file)
+
+    _require_api_credentials(credentials, auth_only=True)
 
     try:
         credentials = perform_oauth_flow(
-            config.credentials.api_key,
-            config.credentials.api_secret,
+            credentials.api_key,
+            credentials.api_secret,
             echo=typer.echo,
         )
     except Exception as error:
@@ -117,10 +149,7 @@ def auth(
     else:
         typer.echo("")
         typer.echo("Save these tokens and use them with:")
-        typer.echo(
-            f"--oauth-token {credentials.oauth_token} "
-            f"--oauth-token-secret {credentials.oauth_token_secret}"
-        )
+        typer.echo(f"--oauth-token {credentials.oauth_token} --oauth-token-secret {credentials.oauth_token_secret}")
 
 
 @app.command()
