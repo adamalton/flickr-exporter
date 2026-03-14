@@ -13,10 +13,20 @@ from flickr_exporter.models import Album, Photo
 
 DEFAULT_WORKERS = 4
 MIN_HARD_DOWNLOAD_TIMEOUT_PER_PHOTO_SECONDS = 10.0
+MAX_DOWNLOAD_ATTEMPTS = 4
+DOWNLOAD_RETRY_BASE_DELAY_SECONDS = 5.0
 
 
 class MetadataWriterProtocol(Protocol):
     def write_metadata(self, photo_path: str | Path, photo: Photo) -> None: ...
+
+
+class RetryableDownloadError(RuntimeError):
+    pass
+
+
+class PermanentDownloadError(RuntimeError):
+    pass
 
 
 class FlickrExporter:
@@ -223,17 +233,23 @@ class FlickrExporter:
 
     def download_photo(self, photo: Photo, output_path: str | Path) -> None:
         output = Path(output_path)
-        try:
-            self._download_photo_attempt(photo.original_url, output)
-            return
-        except RuntimeError as error:
-            if "HTTP 429" not in str(error):
+        for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
+            try:
+                self._download_photo_attempt(photo.original_url, output)
+                return
+            except PermanentDownloadError:
                 raise
+            except RetryableDownloadError as error:
+                if attempt == MAX_DOWNLOAD_ATTEMPTS:
+                    raise RuntimeError(f"{error} after {MAX_DOWNLOAD_ATTEMPTS} attempts") from error
 
-        if self.verbose:
-            print("  Rate limited, waiting 5 seconds before retry...")
-        self._sleep(5.0)
-        self._download_photo_attempt(photo.original_url, output)
+                delay = DOWNLOAD_RETRY_BASE_DELAY_SECONDS * attempt
+                if self.verbose:
+                    print(
+                        f"  Download attempt {attempt}/{MAX_DOWNLOAD_ATTEMPTS} failed for "
+                        f"{output.name}: {error}. Retrying in {delay:.0f}s..."
+                    )
+                self._sleep(delay)
 
     def _download_photo_attempt(self, url: str, output_path: Path) -> None:
         # This is a per-photo ceiling for a single download attempt, not a limit on the overall export run.
@@ -247,21 +263,24 @@ class FlickrExporter:
                 timeout=(self.client.request_timeout, self.client.request_timeout),
             ) as response:
                 if response.status_code != 200:
-                    raise RuntimeError(f"HTTP {response.status_code}: {response.reason}")
+                    error_message = f"HTTP {response.status_code}: {response.reason}"
+                    if response.status_code == 429:
+                        raise RetryableDownloadError(error_message)
+                    raise PermanentDownloadError(error_message)
                 with output_path.open("wb") as handle:
                     for chunk in response.iter_content(chunk_size=1024 * 64):
                         if monotonic() - started_at > hard_timeout:
-                            raise RuntimeError(
+                            raise RetryableDownloadError(
                                 f"download exceeded hard timeout of {hard_timeout:.0f}s for {output_path.name}"
                             )
                         if chunk:
                             handle.write(chunk)
         except requests.Timeout as error:
-            raise RuntimeError(
+            raise RetryableDownloadError(
                 f"download timed out after {self.client.request_timeout:.0f}s waiting for {output_path.name}"
             ) from error
         except requests.RequestException as error:
-            raise RuntimeError(f"download request failed for {output_path.name}: {error}") from error
+            raise RetryableDownloadError(f"download request failed for {output_path.name}: {error}") from error
 
     def download_unorganized_photos(self, downloaded_files: set[str]) -> None:
         print("Getting all photos from your Flickr account...")

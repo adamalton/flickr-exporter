@@ -7,6 +7,8 @@ import pytest
 
 from flickr_exporter.exporter import (
     FlickrExporter,
+    PermanentDownloadError,
+    RetryableDownloadError,
     album_directory_name,
     filter_unorganized_photos,
     photo_date_directory_name,
@@ -281,3 +283,41 @@ def test_download_photo_attempt_aborts_after_hard_timeout(tmp_path, monkeypatch)
 
     with pytest.raises(RuntimeError, match="hard timeout"):
         exporter._download_photo_attempt("https://example.com/photo.jpg", output_path)
+
+
+def test_download_photo_retries_transient_failures(tmp_path, monkeypatch):
+    exporter = make_exporter(tmp_path)
+    photo = Photo(id="photo-1", filename="photo.jpg", original_url="https://example.com/photo.jpg")
+    attempts: list[int] = []
+    sleeps: list[float] = []
+
+    def fake_attempt(url: str, output_path: Path) -> None:
+        attempts.append(len(attempts) + 1)
+        if len(attempts) < 3:
+            raise RetryableDownloadError("download timed out")
+        output_path.write_bytes(b"downloaded")
+
+    monkeypatch.setattr(exporter, "_download_photo_attempt", fake_attempt)
+    monkeypatch.setattr(exporter, "_sleep", lambda seconds: sleeps.append(seconds))
+
+    exporter.download_photo(photo, tmp_path / "photo.jpg")
+
+    assert attempts == [1, 2, 3]
+    assert sleeps == [5.0, 10.0]
+
+
+def test_download_photo_does_not_retry_permanent_failures(tmp_path, monkeypatch):
+    exporter = make_exporter(tmp_path)
+    photo = Photo(id="photo-1", filename="photo.jpg", original_url="https://example.com/photo.jpg")
+    attempts: list[int] = []
+
+    def fake_attempt(url: str, output_path: Path) -> None:
+        attempts.append(len(attempts) + 1)
+        raise PermanentDownloadError("HTTP 404: Not Found")
+
+    monkeypatch.setattr(exporter, "_download_photo_attempt", fake_attempt)
+
+    with pytest.raises(PermanentDownloadError, match="HTTP 404"):
+        exporter.download_photo(photo, tmp_path / "photo.jpg")
+
+    assert attempts == [1]
