@@ -123,6 +123,8 @@ class FlickrExporter:
 
         errors: list[str] = []
         success_count = 0
+        processed_count = 0
+        total_photos = len(all_photos)
 
         with ThreadPoolExecutor(max_workers=DEFAULT_WORKERS) as executor:
             futures = [
@@ -131,15 +133,20 @@ class FlickrExporter:
             ]
             for future in as_completed(futures):
                 error = future.result()
+                processed_count += 1
                 if error is None:
                     success_count += 1
                 else:
                     errors.append(error)
+                    print(f"  Error: {error}")
+
+                print(
+                    f"Progress: {processed_count}/{total_photos} photos processed "
+                    f"({success_count} succeeded, {len(errors)} errors)"
+                )
 
         if errors:
             print(f"Downloaded {success_count} photos with {len(errors)} errors")
-            for error in errors:
-                print(f"  Error: {error}")
             raise RuntimeError(f"failed to download {len(errors)} photos by date")
 
         print(f"Successfully downloaded {success_count} photos by date")
@@ -244,11 +251,10 @@ class FlickrExporter:
                     raise RuntimeError(f"{error} after {MAX_DOWNLOAD_ATTEMPTS} attempts") from error
 
                 delay = DOWNLOAD_RETRY_BASE_DELAY_SECONDS * attempt
-                if self.verbose:
-                    print(
-                        f"  Download attempt {attempt}/{MAX_DOWNLOAD_ATTEMPTS} failed for "
-                        f"{output.name}: {error}. Retrying in {delay:.0f}s..."
-                    )
+                print(
+                    f"  Download attempt {attempt}/{MAX_DOWNLOAD_ATTEMPTS} failed for "
+                    f"{output.name}: {error}. Retrying in {delay:.0f}s..."
+                )
                 self._sleep(delay)
 
     def _download_photo_attempt(self, url: str, output_path: Path) -> None:
@@ -301,6 +307,8 @@ class FlickrExporter:
 
         errors: list[str] = []
         success_count = 0
+        processed_count = 0
+        total_photos = len(unorganized_photos)
 
         with ThreadPoolExecutor(max_workers=DEFAULT_WORKERS) as executor:
             futures = [
@@ -309,15 +317,20 @@ class FlickrExporter:
             ]
             for future in as_completed(futures):
                 error = future.result()
+                processed_count += 1
                 if error is None:
                     success_count += 1
                 else:
                     errors.append(error)
+                    print(f"  Error: {error}")
+
+                print(
+                    f"Unorganized progress: {processed_count}/{total_photos} photos processed "
+                    f"({success_count} succeeded, {len(errors)} errors)"
+                )
 
         if errors:
             print(f"Downloaded {success_count} unorganized photos with {len(errors)} errors")
-            for error in errors:
-                print(f"  Error: {error}")
             raise RuntimeError(f"failed to download {len(errors)} unorganized photos")
 
         print(f"Successfully downloaded {success_count} unorganized photos")
@@ -338,8 +351,8 @@ class FlickrExporter:
     def _download_dated_photo(self, worker_id: int, photo: Photo) -> str | None:
         worker_exporter = self.clone()
         resolved_filename = photo_output_filename(photo)
+        print(f"[Worker {worker_id}] Starting photo {photo.id} ({photo.title or resolved_filename})")
         if worker_exporter.verbose:
-            print(f"[Worker {worker_id}] Downloading dated photo: {photo.title or resolved_filename}")
             print(f"[Worker {worker_id}] Fetching metadata for photo {photo.id}")
 
         try:
@@ -348,6 +361,7 @@ class FlickrExporter:
             return f"worker {worker_id}: failed to process {resolved_filename}: {error}"
 
         target_dir = worker_exporter.output_dir / photo_date_directory_name(photo)
+        print(f"[Worker {worker_id}] Target path: {target_dir.name}/{resolved_filename}")
         return worker_exporter._download_photo_to_directory(worker_id, photo, target_dir)
 
     def _download_photo_to_directory(self, worker_id: int, photo: Photo, target_dir: Path) -> str | None:
