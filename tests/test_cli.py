@@ -90,7 +90,7 @@ def test_missing_default_creds_file_does_not_error():
 
 
 def test_date_command_calls_date_export(monkeypatch):
-    called: dict[str, bool] = {"exported": False}
+    called: dict[str, object] = {"exported": False}
 
     class FakeExporter:
         def export_all_photos_by_date(self) -> None:
@@ -98,7 +98,7 @@ def test_date_command_calls_date_export(monkeypatch):
 
     monkeypatch.setattr(
         "flickr_exporter.cli._build_exporter",
-        lambda config: FakeExporter(),
+        lambda config: called.update({"workers": config.workers}) or FakeExporter(),
     )
 
     result = runner.invoke(
@@ -108,6 +108,8 @@ def test_date_command_calls_date_export(monkeypatch):
             "key",
             "--api-secret",
             "secret",
+            "--workers",
+            "2",
             "--oauth-token",
             "token",
             "--oauth-token-secret",
@@ -118,4 +120,5 @@ def test_date_command_calls_date_export(monkeypatch):
 
     assert result.exit_code == 0
     assert called["exported"] is True
+    assert called["workers"] == 2
     assert "Successfully exported all photos by date" in result.output

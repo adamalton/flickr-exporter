@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+import random
 from pathlib import Path
 from threading import Lock
 from time import monotonic, sleep
-from typing import Callable, Protocol
+from typing import Callable, Iterator, Protocol
 
 import requests
 
@@ -25,8 +26,18 @@ class RetryableDownloadError(RuntimeError):
     pass
 
 
+class RateLimitedDownloadError(RetryableDownloadError):
+    pass
+
+
 class PermanentDownloadError(RuntimeError):
     pass
+
+
+class DownloadThrottle:
+    def __init__(self) -> None:
+        self.lock = Lock()
+        self.cooldown_until = 0.0
 
 
 class FlickrExporter:
@@ -36,22 +47,34 @@ class FlickrExporter:
         output_dir: str,
         metadata_writer: MetadataWriterProtocol,
         *,
+        workers: int = DEFAULT_WORKERS,
         verbose: bool = False,
         sleeper: Callable[[float], None] = sleep,
+        now: Callable[[], float] = monotonic,
+        jitter: Callable[[float, float], float] = random.uniform,
+        download_throttle: DownloadThrottle | None = None,
     ) -> None:
         self.client = client
         self.output_dir = Path(output_dir)
         self.metadata_writer = metadata_writer
+        self.workers = max(1, workers)
         self.verbose = verbose
         self._sleep = sleeper
+        self._now = now
+        self._jitter = jitter
+        self._download_throttle = download_throttle or DownloadThrottle()
 
     def clone(self) -> "FlickrExporter":
         return type(self)(
             client=self.client.clone(),
             output_dir=str(self.output_dir),
             metadata_writer=self.metadata_writer,
+            workers=self.workers,
             verbose=self.verbose,
             sleeper=self._sleep,
+            now=self._now,
+            jitter=self._jitter,
+            download_throttle=self._download_throttle,
         )
 
     def export_album(self, album_id: str) -> None:
@@ -80,13 +103,13 @@ class FlickrExporter:
 
     def export_all_photos(self) -> None:
         albums = self.client.get_all_albums()
-        print(f"Found {len(albums)} albums, processing with {DEFAULT_WORKERS} concurrent workers...")
+        print(f"Found {len(albums)} albums, processing with {self.workers} concurrent workers...")
 
         downloaded_files: set[str] = set()
         downloaded_files_lock = Lock()
         errors: list[str] = []
 
-        with ThreadPoolExecutor(max_workers=DEFAULT_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
             futures = [
                 executor.submit(
                     self._process_album_with_tracking, worker_id, album, downloaded_files, downloaded_files_lock
@@ -119,14 +142,14 @@ class FlickrExporter:
             print("No photos found in your Flickr account")
             return
 
-        print(f"Found {len(all_photos)} photos, processing with {DEFAULT_WORKERS} concurrent workers...")
+        print(f"Found {len(all_photos)} photos, processing with {self.workers} concurrent workers...")
 
         errors: list[str] = []
         success_count = 0
         processed_count = 0
         total_photos = len(all_photos)
 
-        with ThreadPoolExecutor(max_workers=DEFAULT_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
             photo_iterator = iter(enumerate(all_photos, start=1))
             pending = self._submit_dated_photo_futures(executor, photo_iterator)
 
@@ -158,11 +181,11 @@ class FlickrExporter:
     def _submit_dated_photo_futures(
         self,
         executor: ThreadPoolExecutor,
-        photo_iterator: object,
-        pending: set | None = None,
-    ) -> set:
+        photo_iterator: Iterator[tuple[int, Photo]],
+        pending: set[Future[str | None]] | None = None,
+    ) -> set[Future[str | None]]:
         pending_futures = set() if pending is None else pending
-        while len(pending_futures) < DEFAULT_WORKERS:
+        while len(pending_futures) < self.workers:
             try:
                 task_id, photo = next(photo_iterator)
             except StopIteration:
@@ -260,21 +283,55 @@ class FlickrExporter:
     def download_photo(self, photo: Photo, output_path: str | Path) -> None:
         output = Path(output_path)
         for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
+            self._wait_for_global_cooldown(output.name)
             try:
                 self._download_photo_attempt(photo.original_url, output)
                 return
             except PermanentDownloadError:
                 raise
+            except RateLimitedDownloadError as error:
+                if attempt == MAX_DOWNLOAD_ATTEMPTS:
+                    raise RuntimeError(f"{error} after {MAX_DOWNLOAD_ATTEMPTS} attempts") from error
+
+                delay = self._retry_delay_seconds(attempt)
+                delay = self._apply_global_cooldown(delay)
+                print(
+                    f"  Download attempt {attempt}/{MAX_DOWNLOAD_ATTEMPTS} failed for "
+                    f"{output.name}: {error}. Backing off for {delay:.0f}s..."
+                )
+                self._sleep(delay)
             except RetryableDownloadError as error:
                 if attempt == MAX_DOWNLOAD_ATTEMPTS:
                     raise RuntimeError(f"{error} after {MAX_DOWNLOAD_ATTEMPTS} attempts") from error
 
-                delay = DOWNLOAD_RETRY_BASE_DELAY_SECONDS * attempt
+                delay = self._retry_delay_seconds(attempt)
                 print(
                     f"  Download attempt {attempt}/{MAX_DOWNLOAD_ATTEMPTS} failed for "
                     f"{output.name}: {error}. Retrying in {delay:.0f}s..."
                 )
                 self._sleep(delay)
+
+    def _retry_delay_seconds(self, attempt: int) -> float:
+        base_delay = DOWNLOAD_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+        return base_delay + self._jitter(0.0, base_delay * 0.25)
+
+    def _apply_global_cooldown(self, requested_delay: float) -> float:
+        now = self._now()
+        requested_cooldown_until = now + requested_delay
+        with self._download_throttle.lock:
+            if requested_cooldown_until > self._download_throttle.cooldown_until:
+                self._download_throttle.cooldown_until = requested_cooldown_until
+            return max(0.0, self._download_throttle.cooldown_until - now)
+
+    def _wait_for_global_cooldown(self, output_name: str) -> None:
+        with self._download_throttle.lock:
+            remaining = self._download_throttle.cooldown_until - self._now()
+
+        if remaining <= 0:
+            return
+
+        print(f"  Global rate-limit cooldown active for {remaining:.0f}s before retrying {output_name}...")
+        self._sleep(remaining)
 
     def _download_photo_attempt(self, url: str, output_path: Path) -> None:
         # This is a per-photo ceiling for a single download attempt, not a limit on the overall export run.
@@ -290,7 +347,7 @@ class FlickrExporter:
                 if response.status_code != 200:
                     error_message = f"HTTP {response.status_code}: {response.reason}"
                     if response.status_code == 429:
-                        raise RetryableDownloadError(error_message)
+                        raise RateLimitedDownloadError(error_message)
                     raise PermanentDownloadError(error_message)
                 with output_path.open("wb") as handle:
                     for chunk in response.iter_content(chunk_size=1024 * 64):
@@ -318,7 +375,7 @@ class FlickrExporter:
 
         print(
             f"Found {len(unorganized_photos)} unorganized photos to download, "
-            f"processing with {DEFAULT_WORKERS} concurrent workers..."
+            f"processing with {self.workers} concurrent workers..."
         )
 
         unorganized_dir = self.output_dir / "Unorganized Photos"
@@ -329,7 +386,7 @@ class FlickrExporter:
         processed_count = 0
         total_photos = len(unorganized_photos)
 
-        with ThreadPoolExecutor(max_workers=DEFAULT_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
             photo_iterator = iter(enumerate(unorganized_photos, start=1))
             pending = self._submit_unorganized_photo_futures(executor, photo_iterator, unorganized_dir)
 
@@ -361,12 +418,12 @@ class FlickrExporter:
     def _submit_unorganized_photo_futures(
         self,
         executor: ThreadPoolExecutor,
-        photo_iterator: object,
+        photo_iterator: Iterator[tuple[int, Photo]],
         unorganized_dir: Path,
-        pending: set | None = None,
-    ) -> set:
+        pending: set[Future[str | None]] | None = None,
+    ) -> set[Future[str | None]]:
         pending_futures = set() if pending is None else pending
-        while len(pending_futures) < DEFAULT_WORKERS:
+        while len(pending_futures) < self.workers:
             try:
                 task_id, photo = next(photo_iterator)
             except StopIteration:

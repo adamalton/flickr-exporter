@@ -75,14 +75,19 @@ class FakeFlickrClient:
         )
 
 
-def make_exporter(tmp_path, *, metadata_writer=None) -> FlickrExporter:
-    return FlickrExporter(
-        client=FakeFlickrClient(),
-        output_dir=str(tmp_path),
-        metadata_writer=metadata_writer or DummyMetadataWriter(),
-        verbose=False,
-        sleeper=lambda _: None,
-    )
+def make_exporter(tmp_path, *, metadata_writer=None, workers: int = 4, now=None, jitter=None) -> FlickrExporter:
+    kwargs = {
+        "client": FakeFlickrClient(),
+        "output_dir": str(tmp_path),
+        "metadata_writer": metadata_writer or DummyMetadataWriter(),
+        "workers": workers,
+        "verbose": False,
+        "sleeper": lambda _: None,
+        "jitter": jitter or (lambda lower, upper: 0.0),
+    }
+    if now is not None:
+        kwargs["now"] = now
+    return FlickrExporter(**kwargs)
 
 
 def test_sanitize_filename_replaces_problem_characters():
@@ -321,3 +326,61 @@ def test_download_photo_does_not_retry_permanent_failures(tmp_path, monkeypatch)
         exporter.download_photo(photo, tmp_path / "photo.jpg")
 
     assert attempts == [1]
+
+
+def test_download_photo_rate_limit_applies_shared_cooldown(tmp_path, monkeypatch):
+    current_time = 0.0
+    sleep_calls: list[float] = []
+    exporter = make_exporter(
+        tmp_path,
+        now=lambda: current_time,
+        jitter=lambda lower, upper: 0.0,
+    )
+    cloned_exporter = exporter.clone()
+
+    def fake_sleep(seconds: float) -> None:
+        nonlocal current_time
+        sleep_calls.append(seconds)
+        current_time += seconds
+
+    monkeypatch.setattr(exporter, "_sleep", fake_sleep)
+    monkeypatch.setattr(cloned_exporter, "_sleep", fake_sleep)
+
+    cooldown = exporter._apply_global_cooldown(exporter._retry_delay_seconds(1))
+    assert cooldown == 5.0
+
+    cloned_exporter._wait_for_global_cooldown("photo.jpg")
+
+    assert sleep_calls == [5.0]
+
+
+def test_export_all_photos_by_date_uses_configured_worker_count(tmp_path, monkeypatch):
+    writer = DummyMetadataWriter()
+    client = FakeFlickrClient()
+    client.all_photos = [
+        Photo(id="photo-1", filename="photo-1.jpg", original_url="https://example.com/photo-1.jpg"),
+        Photo(id="photo-2", filename="photo-2.jpg", original_url="https://example.com/photo-2.jpg"),
+    ]
+    exporter = FlickrExporter(
+        client=client,
+        output_dir=str(tmp_path),
+        metadata_writer=writer,
+        workers=1,
+        verbose=False,
+        sleeper=lambda _: None,
+    )
+    active_calls = 0
+    max_active_calls = 0
+
+    def fake_download(task_id: int, photo: Photo) -> str | None:
+        nonlocal active_calls, max_active_calls
+        active_calls += 1
+        max_active_calls = max(max_active_calls, active_calls)
+        active_calls -= 1
+        return None
+
+    monkeypatch.setattr(exporter, "_download_dated_photo", fake_download)
+
+    exporter.export_all_photos_by_date()
+
+    assert max_active_calls == 1
