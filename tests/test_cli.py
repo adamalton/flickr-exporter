@@ -87,3 +87,35 @@ def test_missing_default_creds_file_does_not_error():
 
         assert result.exit_code == 1
         assert "Provide them via flags or credentials file (-c)" in result.output
+
+
+def test_date_command_calls_date_export(monkeypatch):
+    called: dict[str, bool] = {"exported": False}
+
+    class FakeExporter:
+        def export_all_photos_by_date(self) -> None:
+            called["exported"] = True
+
+    monkeypatch.setattr(
+        "flickr_exporter.cli._build_exporter",
+        lambda config: FakeExporter(),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--api-key",
+            "key",
+            "--api-secret",
+            "secret",
+            "--oauth-token",
+            "token",
+            "--oauth-token-secret",
+            "token-secret",
+            "date",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert called["exported"] is True
+    assert "Successfully exported all photos by date" in result.output

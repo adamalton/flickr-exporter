@@ -8,6 +8,7 @@ A Python command-line tool to download and archive your Flickr photos with metad
 - Download specific albums (photosets) or collections
 - Preserve photo metadata (title, description, tags) as IPTC/XMP data via `exiftool`
 - Organize downloads by album with date prefixes
+- Organize downloads by photo date in monthly folders
 - Resume interrupted runs by skipping existing files
 - Download unorganized photos into a separate folder
 - Authenticate with Flickr using OAuth and reusable YAML credentials
@@ -60,6 +61,12 @@ Download all photos, organized by album:
 flickr-exporter all -o /path/to/output/directory
 ```
 
+Download all photos, organized by month taken:
+
+```bash
+flickr-exporter date -o /path/to/output/directory
+```
+
 Download one or more albums:
 
 ```bash
@@ -100,6 +107,8 @@ output-directory/
 
 Albums are prefixed with their creation date in `YYYY-MM-DD` format for chronological sorting.
 
+The `date` command writes photos into `YYYY-MM/` folders such as `2026-01/` and `2026-02/`. Photos without a taken date are written to `Unknown Date/`.
+
 ### Metadata Preservation
 
 The exporter writes the following metadata to each downloaded photo:
@@ -119,6 +128,9 @@ flickr-exporter auth -k abc123 -s xyz789 --save-creds creds.yml
 
 # Download all photos
 flickr-exporter all -o ~/Pictures/Flickr-Backup
+
+# Download all photos into year-month folders
+flickr-exporter date -o ~/Pictures/Flickr-By-Date
 
 # Download a specific album with verbose output
 flickr-exporter album 72157694563874100 -o ~/Pictures -v

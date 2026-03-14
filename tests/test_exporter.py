@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from flickr_exporter.exporter import FlickrExporter, album_directory_name, filter_unorganized_photos, sanitize_filename
+from flickr_exporter.exporter import (
+    FlickrExporter,
+    album_directory_name,
+    filter_unorganized_photos,
+    photo_date_directory_name,
+    sanitize_filename,
+)
 from flickr_exporter.models import Album, Credentials, Photo
 
 
@@ -84,6 +90,16 @@ def test_album_directory_name_uses_date_prefix():
     album = Album(id="1", title="Trip", date_created=datetime(2023, 1, 15))
 
     assert album_directory_name(album) == "2023-01-15 Trip"
+
+
+def test_photo_date_directory_name_uses_year_month():
+    photo = Photo(id="1", date_taken=datetime(2026, 2, 10, 12, 0, 0))
+
+    assert photo_date_directory_name(photo) == "2026-02"
+
+
+def test_photo_date_directory_name_handles_missing_date():
+    assert photo_date_directory_name(Photo(id="1")) == "Unknown Date"
 
 
 def test_download_album_skips_existing_files_without_fetching_metadata(tmp_path, monkeypatch):
@@ -165,3 +181,31 @@ def test_export_all_tracks_album_filenames_before_unorganized_step(tmp_path, mon
     exporter.export_all_photos()
 
     assert captured["downloaded_files"] == {"album-photo.jpg"}
+
+
+def test_export_all_photos_by_date_uses_year_month_directories(tmp_path, monkeypatch):
+    writer = DummyMetadataWriter()
+    client = FakeFlickrClient()
+    client.all_photos = [Photo(id="photo-1", filename="photo.jpg", original_url="https://example.com/photo.jpg")]
+    exporter = FlickrExporter(
+        client=client,
+        output_dir=str(tmp_path),
+        metadata_writer=writer,
+        verbose=False,
+        sleeper=lambda _: None,
+    )
+
+    def fake_fetch(photo: Photo) -> None:
+        photo.date_taken = datetime(2026, 2, 10, 12, 0, 0)
+
+    def fake_download(photo: Photo, output_path: str | Path) -> None:
+        Path(output_path).write_bytes(b"downloaded")
+
+    monkeypatch.setattr(FlickrExporter, "fetch_photo_metadata", lambda self, photo: fake_fetch(photo))
+    monkeypatch.setattr(FlickrExporter, "download_photo", lambda self, photo, output_path: fake_download(photo, output_path))
+
+    exporter.export_all_photos_by_date()
+
+    expected_path = tmp_path / "2026-02" / "photo.jpg"
+    assert expected_path.exists()
+    assert writer.calls[0][0] == expected_path

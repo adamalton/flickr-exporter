@@ -225,5 +225,26 @@ def export_all(ctx: typer.Context) -> None:
     typer.echo("Successfully exported all photos")
 
 
+@app.command()
+def date(ctx: typer.Context) -> None:
+    config: AppConfig = ctx.obj
+    _require_api_credentials(config.credentials)
+
+    try:
+        exporter = _build_exporter(config)
+    except Exception as error:
+        typer.echo(f"Error creating exporter: {error}")
+        raise typer.Exit(code=1) from error
+
+    typer.echo("Exporting all photos by date...")
+    try:
+        exporter.export_all_photos_by_date()
+    except Exception as error:
+        typer.echo(f"Error exporting all photos by date: {error}")
+        raise typer.Exit(code=1) from error
+
+    typer.echo("Successfully exported all photos by date")
+
+
 if __name__ == "__main__":
     app()

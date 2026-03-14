@@ -100,6 +100,38 @@ class FlickrExporter:
 
         print("All photos processed successfully!")
 
+    def export_all_photos_by_date(self) -> None:
+        print("Getting all photos from your Flickr account...")
+        all_photos = self.client.get_all_photos()
+        if not all_photos:
+            print("No photos found in your Flickr account")
+            return
+
+        print(f"Found {len(all_photos)} photos, processing with {DEFAULT_WORKERS} concurrent workers...")
+
+        errors: list[str] = []
+        success_count = 0
+
+        with ThreadPoolExecutor(max_workers=DEFAULT_WORKERS) as executor:
+            futures = [
+                executor.submit(self._download_dated_photo, worker_id, photo)
+                for worker_id, photo in enumerate(all_photos, start=1)
+            ]
+            for future in as_completed(futures):
+                error = future.result()
+                if error is None:
+                    success_count += 1
+                else:
+                    errors.append(error)
+
+        if errors:
+            print(f"Downloaded {success_count} photos with {len(errors)} errors")
+            for error in errors:
+                print(f"  Error: {error}")
+            raise RuntimeError(f"failed to download {len(errors)} photos by date")
+
+        print(f"Successfully downloaded {success_count} photos by date")
+
     def _process_album_with_tracking(
         self,
         worker_id: int,
@@ -251,16 +283,37 @@ class FlickrExporter:
         if worker_exporter.verbose:
             print(f"[Worker {worker_id}] Downloading unorganized photo: {photo.title}")
 
-        photo_path = unorganized_dir / photo.filename
+        try:
+            worker_exporter.fetch_photo_metadata(photo)
+        except Exception as error:
+            return f"worker {worker_id}: failed to process {photo.filename}: {error}"
+
+        return worker_exporter._download_photo_to_directory(worker_id, photo, unorganized_dir)
+
+    def _download_dated_photo(self, worker_id: int, photo: Photo) -> str | None:
+        worker_exporter = self.clone()
+        if worker_exporter.verbose:
+            print(f"[Worker {worker_id}] Downloading dated photo: {photo.title}")
+
+        try:
+            worker_exporter.fetch_photo_metadata(photo)
+        except Exception as error:
+            return f"worker {worker_id}: failed to process {photo.filename}: {error}"
+
+        target_dir = worker_exporter.output_dir / photo_date_directory_name(photo)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return worker_exporter._download_photo_to_directory(worker_id, photo, target_dir)
+
+    def _download_photo_to_directory(self, worker_id: int, photo: Photo, target_dir: Path) -> str | None:
+        photo_path = target_dir / photo.filename
         if photo_path.exists():
-            if worker_exporter.verbose:
+            if self.verbose:
                 print(f"[Worker {worker_id}] Skipping (already exists): {photo.filename}")
             return None
 
         try:
-            worker_exporter.fetch_photo_metadata(photo)
-            worker_exporter.download_photo(photo, photo_path)
-            worker_exporter.metadata_writer.write_metadata(photo_path, photo)
+            self.download_photo(photo, photo_path)
+            self.metadata_writer.write_metadata(photo_path, photo)
         except Exception as error:
             if photo_path.exists():
                 try:
@@ -269,13 +322,19 @@ class FlickrExporter:
                     print(f"[Worker {worker_id}] Error: Also failed to remove incomplete photo {photo.filename}: {remove_error}")
             return f"worker {worker_id}: failed to process {photo.filename}: {error}"
 
-        worker_exporter._sleep(0.1)
+        self._sleep(0.1)
         return None
 
 
 def album_directory_name(album: Album) -> str:
     date_prefix = album.date_created.strftime("%Y-%m-%d") if album.date_created else "1970-01-01"
     return f"{date_prefix} {sanitize_filename(album.title)}"
+
+
+def photo_date_directory_name(photo: Photo) -> str:
+    if photo.date_taken is None:
+        return "Unknown Date"
+    return photo.date_taken.strftime("%Y-%m")
 
 
 def sanitize_filename(filename: str) -> str:
