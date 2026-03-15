@@ -237,8 +237,7 @@ class FlickrExporter:
 
             photo_path = album_path / resolved_filename
             if photo_path.exists():
-                if self.verbose:
-                    print(f"  Skipping (already exists): {photo_path.name}")
+                print(f"  Skipping (already downloaded): {photo_path.name}")
                 continue
 
             try:
@@ -469,8 +468,7 @@ class FlickrExporter:
 
         photo_path = target_dir / resolved_filename
         if photo_path.exists():
-            if self.verbose:
-                print(f"[Task {task_id}] Skipping (already exists): {photo_path}")
+            print(f"[Task {task_id}] Skipping (already downloaded): {photo_path}")
             return None
 
         if self.verbose:
