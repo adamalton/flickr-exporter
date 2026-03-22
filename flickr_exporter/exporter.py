@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+import json
+import os
 import random
 from pathlib import Path
 from threading import Lock
@@ -32,6 +34,17 @@ class RateLimitedDownloadError(RetryableDownloadError):
 
 class PermanentDownloadError(RuntimeError):
     pass
+
+
+class FailedDateDownload:
+    """Result for a single failed photo in the date export."""
+
+    __slots__ = ("url", "path", "error")
+
+    def __init__(self, url: str, path: Path, error: str) -> None:
+        self.url = url
+        self.path = path
+        self.error = error
 
 
 class DownloadThrottle:
@@ -142,9 +155,13 @@ class FlickrExporter:
             print("No photos found in your Flickr account")
             return
 
+        # Ensure "Unknown Date" exists so photos without a taken date can be written
+        # (avoids failures if workers never reach _download_photo_to_directory)
+        (self.output_dir / "Unknown Date").mkdir(parents=True, exist_ok=True)
+
         print(f"Found {len(all_photos)} photos, processing with {self.workers} concurrent workers...")
 
-        errors: list[str] = []
+        failed: list[FailedDateDownload] = []
         success_count = 0
         processed_count = 0
         total_photos = len(all_photos)
@@ -158,23 +175,40 @@ class FlickrExporter:
                 pending = set(pending)
 
                 for future in done:
-                    error = future.result()
+                    result = future.result()
                     processed_count += 1
-                    if error is None:
+                    if result is None:
                         success_count += 1
                     else:
-                        errors.append(error)
-                        print(f"  Error: {error}")
+                        failed.append(result)
+                        print(f"  Error: {result.error}")
 
                     print(
                         f"Progress: {processed_count}/{total_photos} photos processed "
-                        f"({success_count} succeeded, {len(errors)} errors)"
+                        f"({success_count} succeeded, {len(failed)} errors)"
                     )
                     pending = self._submit_dated_photo_futures(executor, photo_iterator, pending)
 
-        if errors:
-            print(f"Downloaded {success_count} photos with {len(errors)} errors")
-            raise RuntimeError(f"failed to download {len(errors)} photos by date")
+        if failed:
+            failures_json_data = {
+                "failures": [
+                    {
+                        "url": failure.url,
+                        "path": failure.path,
+                        "error": failure.error,
+                    }
+                    for failure in failed
+                ],
+                "count": len(failed),
+            }
+            with open(os.path.join(self.output_dir, "failures.json"), "w") as f:
+                json.dump(failures_json_data, f)
+            print(f"Downloaded {success_count} photos with {len(failed)} errors")
+            print("\nFailed downloads (URL and expected path):")
+            for i, item in enumerate(failed, start=1):
+                print(f"  {i}. URL: {item.url or '(not available)'}")
+                print(f"     Path: {item.path}")
+            raise RuntimeError(f"failed to download {len(failed)} photos by date")
 
         print(f"Successfully downloaded {success_count} photos by date")
 
@@ -182,8 +216,8 @@ class FlickrExporter:
         self,
         executor: ThreadPoolExecutor,
         photo_iterator: Iterator[tuple[int, Photo]],
-        pending: set[Future[str | None]] | None = None,
-    ) -> set[Future[str | None]]:
+        pending: set[Future[FailedDateDownload | None]] | None = None,
+    ) -> set[Future[FailedDateDownload | None]]:
         pending_futures = set() if pending is None else pending
         while len(pending_futures) < self.workers:
             try:
@@ -441,9 +475,12 @@ class FlickrExporter:
         except Exception as error:
             return f"task {task_id}: failed to process {resolved_filename}: {error}"
 
-        return worker_exporter._download_photo_to_directory(task_id, photo, unorganized_dir)
+        result = worker_exporter._download_photo_to_directory(task_id, photo, unorganized_dir)
+        if result is None:
+            return None
+        return result.error
 
-    def _download_dated_photo(self, task_id: int, photo: Photo) -> str | None:
+    def _download_dated_photo(self, task_id: int, photo: Photo) -> FailedDateDownload | None:
         worker_exporter = self.clone()
         resolved_filename = photo_output_filename(photo)
         print(f"[Task {task_id}] Starting photo {photo.id} ({photo.title or resolved_filename})")
@@ -453,13 +490,19 @@ class FlickrExporter:
         try:
             worker_exporter.fetch_photo_metadata(photo)
         except Exception as error:
-            return f"task {task_id}: failed to process {resolved_filename}: {error}"
+            target_dir = worker_exporter.output_dir / photo_date_directory_name(photo)
+            photo_path = target_dir / resolved_filename
+            return FailedDateDownload(
+                url=photo.original_url or "",
+                path=photo_path,
+                error=f"task {task_id}: failed to process {resolved_filename}: {error}",
+            )
 
         target_dir = worker_exporter.output_dir / photo_date_directory_name(photo)
         print(f"[Task {task_id}] Target path: {target_dir.name}/{resolved_filename}")
         return worker_exporter._download_photo_to_directory(task_id, photo, target_dir)
 
-    def _download_photo_to_directory(self, task_id: int, photo: Photo, target_dir: Path) -> str | None:
+    def _download_photo_to_directory(self, task_id: int, photo: Photo, target_dir: Path) -> FailedDateDownload | None:
         resolved_filename = photo_output_filename(photo)
         if not photo.filename.strip():
             print(
@@ -495,7 +538,11 @@ class FlickrExporter:
                 target_dir.rmdir()
             except OSError:
                 pass
-            return f"task {task_id}: failed to process {resolved_filename}: {error}"
+            return FailedDateDownload(
+                url=photo.original_url or "",
+                path=photo_path,
+                error=f"task {task_id}: failed to process {resolved_filename}: {error}",
+            )
 
         if self.verbose:
             print(f"[Task {task_id}] Completed {photo_path}")
